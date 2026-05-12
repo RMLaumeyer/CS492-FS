@@ -44,7 +44,10 @@ static int blkdev_size(struct blkdev * dev)
     struct image * im = dev->private;
     assert(im);
 
-    // TODO:
+    if (im->fd < 0) 
+    {
+        return BLKDEV_E_UNAVAIL;
+    }
 
     return im->size;
 }
@@ -69,15 +72,29 @@ static int blkdev_read(
     struct image * im = dev->private;
     assert(im);
 
-    // TODO:
-
     // check if unavailable
+    if (im->fd < 0) 
+    {
+        return BLKDEV_E_UNAVAIL;
+    }
 
     // check block range
+    if (n > 0 && (start >= (uint32_t)im->size || n > (uint32_t)im->size - start)) 
+    {
+        return BLKDEV_E_BADADDR;
+    }
 
     // read blocks
-    
-    return BLKDEV_E_FAULT;
+    size_t bytes = (size_t)n * BLKDEV_BLKSZ;
+    off_t offset = (off_t)start * BLKDEV_BLKSZ;
+
+    ssize_t result = pread(im->fd, buf, bytes, offset);
+    if (result < 0 || (size_t)result != bytes) 
+    {
+        return BLKDEV_E_FAULT;
+    }
+
+    return BLKDEV_SUCCESS;
 }
 
 
@@ -102,15 +119,35 @@ static int blkdev_write(
     struct image * im = dev->private;
     assert(im);
 
-    // TODO:
-
     // check if unavailable
-    
+    if (im->fd < 0) 
+    {
+        return BLKDEV_E_UNAVAIL;
+    }
+
     // check block range
+    if (n > 0 && (start >= (uint32_t)im->size || n > (uint32_t)im->size - start)) 
+    {
+        return BLKDEV_E_BADADDR;
+    }
+
+    // do not allow writing to the superblock
+    if (n > 0 && start == 0) 
+    {
+        return BLKDEV_E_BADADDR;
+    }
 
     // write blocks
+    size_t bytes = (size_t)n * BLKDEV_BLKSZ;
+    off_t offset = (off_t)start * BLKDEV_BLKSZ;
 
-    return BLKDEV_E_FAULT;
+    ssize_t result = pwrite(im->fd, buf, bytes, offset);
+    if (result < 0 || (size_t)result != bytes) 
+    {
+        return BLKDEV_E_FAULT;
+    }
+
+    return BLKDEV_SUCCESS;
 }
 
 
@@ -131,9 +168,13 @@ static int blkdev_flush(struct blkdev * dev, uint32_t start, uint32_t n)
     struct image * im = dev->private;
     assert(im);
 
-    // TODO:
+    // no internal buffers, so only check availability
+    if (im->fd < 0) 
+    {
+        return BLKDEV_E_UNAVAIL;
+    }
 
-    return BLKDEV_E_FAULT;
+    return BLKDEV_SUCCESS;
 }
 
 
@@ -157,11 +198,22 @@ static void blkdev_close(struct blkdev * dev)
     struct image * im = dev->private;
     assert(im);
 
-    // TODO:
-
     // close image file
+    if (im->fd >= 0) 
+    {
+        close(im->fd);
+        im->fd = -1;
+    }
 
     // free allocated memory
+    if (im->path) 
+    {
+        free(im->path);
+        im->path = NULL;
+    }
+
+    free(im);
+    dev->private = NULL;
 
 }
 

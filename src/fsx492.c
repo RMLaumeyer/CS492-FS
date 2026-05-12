@@ -503,11 +503,16 @@ static inline ssize_t search_block(
     assert(name);
     assert(entries);
 
-    // TODO:
-
     // find index of `name` parameter if found in `entries` array
+    for (size_t i = 0; i < FSX492_DIRENTRIES_PER_BLK; i++) 
+    {
+        if (entries[i].valid && strcmp(entries[i].name, name) == 0) 
+        {
+            return i;
+        }
+    }
 
-    return -ENOSYS;
+    return -ENOENT;
 }
 
 /**
@@ -530,13 +535,55 @@ static int find_entry(
     assert(ctx);
     assert(name);
 
-    // TODO:
+    if (dir_ino == 0) 
+    {
+        return -EINVAL;
+    }
+
+    if (validate_inode(dir_ino, ctx) < 0) 
+    {
+        return -ENOENT;
+    }
 
     // check if directory
+    struct fsx492_inode * dir = &ctx->inodes[dir_ino];
+    if (!S_ISDIR(dir->mode)) 
+    {
+        return -ENOTDIR;
+    }
 
     // search directory entries in direct_blks
+    for (size_t i = 0; i < FSX492_N_DIRECT; i++) 
+    {
+        if (dir->direct_blks[i] == 0) 
+        {
+            continue;
+        }
 
-    return -ENOSYS;
+        if (validate_block(dir->direct_blks[i], ctx) < 0) 
+        {
+            return -EIO;
+        }
+
+        struct fsx492_dirent entries[FSX492_DIRENTRIES_PER_BLK];
+
+        if (read_blks(dir->direct_blks[i], 1, entries) < 0) 
+        {
+            return -EIO;
+        }
+
+        ssize_t idx = search_block(name, entries);
+        if (idx >= 0) 
+        {
+            if (ino) 
+            {
+                *ino = entries[idx].ino;
+            }
+            return 0;
+        }
+    }
+
+    return -ENOENT;
 }
 
 
@@ -799,25 +846,133 @@ static int _link(
     assert(dir_ino);
     assert(ctx);
 
-    // TODO:
-
     // validate name length
+    if (name[0] == '\0' || strlen(name) >= FSX492_FILENAMESZ) 
+    {
+        return -EINVAL;
+    }
+
+    if (validate_inode(ino, ctx) < 0) 
+    {
+        return -ENOENT;
+    }
+
+    if (validate_inode(dir_ino, ctx) < 0) 
+    {
+        return -ENOENT;
+    }
 
     // validate directory inode
-    
+    struct fsx492_inode * dir = &ctx->inodes[dir_ino];
+    if (!S_ISDIR(dir->mode)) 
+    {
+        return -ENOTDIR;
+    }
+
+    // make sure the name does not already exist
+    uint32_t existing_ino = 0;
+    int ret = find_entry(name, dir_ino, &existing_ino, ctx);
+    if (ret == 0) 
+    {
+        return -EEXIST;
+    }
+    if (ret != -ENOENT) 
+    {
+        return ret;
+    }
+
     // load directory entries from disk
+    for (size_t i = 0; i < FSX492_N_DIRECT; i++) 
+    {
+        struct fsx492_dirent entries[FSX492_DIRENTRIES_PER_BLK];
+        int allocated_new_block = 0;
 
-    // find a free directory entry (allocate new blocks as needed)
-    
-    // add the info to the entry
+        if (dir->direct_blks[i] == 0) 
+        {
+            uint32_t blkno = 0;
 
-    // write back modified entry to disk
+            ret = alloc_blk(&blkno, ctx);
+            if (ret < 0) 
+            {
+                return ret;
+            }
 
-    // modify directory inode
+            dir->direct_blks[i] = blkno;
+            allocated_new_block = 1;
+            memset(entries, 0, sizeof(entries));
+        } 
+        else
+        {
+            if (validate_block(dir->direct_blks[i], ctx) < 0) 
+            {
+                return -EIO;
+            }
 
-    // modify entry inode
+            if (read_blks(dir->direct_blks[i], 1, entries) < 0) 
+            {
+                return -EIO;
+            }
+        }
 
-    return -ENOSYS;
+        // find a free directory entry
+        for (size_t j = 0; j < FSX492_DIRENTRIES_PER_BLK; j++) 
+        {
+            if (entries[j].valid) 
+            {
+                continue;
+            }
+
+            // add the info to the entry
+            entries[j].valid = 1;
+            entries[j].ino = ino;
+            memset(entries[j].name, 0, FSX492_FILENAMESZ);
+            strncpy(entries[j].name, name, FSX492_FILENAMESZ - 1);
+
+            // write back modified entry to disk
+            if (write_blks(dir->direct_blks[i], 1, entries) < 0) 
+            {
+                if (allocated_new_block) 
+                {
+                    free_blk(dir->direct_blks[i], ctx);
+                    dir->direct_blks[i] = 0;
+                }
+                return -EIO;
+            }
+
+            // modify directory inode
+            if (allocated_new_block) 
+            {
+                dir->blocks++;
+            }
+
+            size_t new_size = (i * FSX492_DIRENTRIES_PER_BLK + j + 1) * FSX492_DIRENTSZ;
+
+            if (new_size > dir->size) 
+            {
+                dir->size = new_size;
+            }
+
+            dir->mtime = time(NULL);
+            dir->ctime = dir->mtime;
+            dirty_inode(dir_ino, ctx);
+
+            // modify entry inode
+            struct fsx492_inode * inode = &ctx->inodes[ino];
+            inode->nlink++;
+            inode->ctime = time(NULL);
+            dirty_inode(ino, ctx);
+
+            return 0;
+        }
+
+        if (allocated_new_block) 
+        {
+            free_blk(dir->direct_blks[i], ctx);
+            dir->direct_blks[i] = 0;
+        }
+    }
+
+    return -ENOSPC;
 }
 
 
@@ -840,21 +995,131 @@ static int _unlink(
     assert(dir_ino);
     assert(ctx);
     
-    // TODO:
+
+    if (validate_inode(dir_ino, ctx) < 0) 
+    {
+        return -ENOENT;
+    }
+
+    struct fsx492_inode * dir = &ctx->inodes[dir_ino];
+
+    if (!S_ISDIR(dir->mode)) 
+    {
+        return -ENOTDIR;
+    }
 
     // load entries from disk and search for the entry
+    for (size_t i = 0; i < FSX492_N_DIRECT; i++) 
+    {
+        if (dir->direct_blks[i] == 0) 
+        {
+            continue;
+        }
 
-    // invalidate the entry
+        if (validate_block(dir->direct_blks[i], ctx) < 0) 
+        {
+            return -EIO;
+        }
 
-    // write back modified entries
+        struct fsx492_dirent entries[FSX492_DIRENTRIES_PER_BLK];
 
-    // change directory file size after writeback succeeds
+        if (read_blks(dir->direct_blks[i], 1, entries) < 0) 
+        {
+            return -EIO;
+        }
 
-    // decrement inode nlink
+        ssize_t idx = search_block(name, entries);
+        if (idx < 0) 
+        {
+            continue;
+        }
 
-    // delete inode if necessary
+        uint32_t target_ino = entries[idx].ino;
 
-    return -ENOSYS;
+        if (validate_inode(target_ino, ctx) < 0) 
+        {
+            return -EIO;
+        }
+
+        // invalidate the entry
+        entries[idx].valid = 0;
+        entries[idx].ino = 0;
+        memset(entries[idx].name, 0, FSX492_FILENAMESZ);
+
+        // write back modified entries
+        if (write_blks(dir->direct_blks[i], 1, entries) < 0) 
+        {
+            return -EIO;
+        }
+
+        // change directory file size after writeback succeeds
+        size_t new_size = 0;
+
+        for (size_t bi = 0; bi < FSX492_N_DIRECT; bi++) 
+        {
+            size_t block_index = (FSX492_N_DIRECT - 1) - bi;
+
+            if (dir->direct_blks[block_index] == 0) 
+            {
+                continue;
+            }
+
+            if (validate_block(dir->direct_blks[block_index], ctx) < 0) 
+            {
+                return -EIO;
+            }
+
+            struct fsx492_dirent tmp[FSX492_DIRENTRIES_PER_BLK];
+
+            if (read_blks(dir->direct_blks[block_index], 1, tmp) < 0) 
+            {
+                return -EIO;
+            }
+
+            for (size_t ei = 0; ei < FSX492_DIRENTRIES_PER_BLK; ei++) 
+            {
+                size_t entry_index = (FSX492_DIRENTRIES_PER_BLK - 1) - ei;
+
+                if (tmp[entry_index].valid) 
+                {
+                    new_size = (block_index * FSX492_DIRENTRIES_PER_BLK + entry_index + 1) * FSX492_DIRENTSZ;
+                    goto found_size;
+                }
+            }
+        }
+
+found_size:
+        dir->size = new_size;
+        dir->mtime = time(NULL);
+        dir->ctime = dir->mtime;
+        dirty_inode(dir_ino, ctx);
+
+        // decrement inode nlink
+        struct fsx492_inode * inode = &ctx->inodes[target_ino];
+
+        if (inode->nlink > 0) 
+        {
+            inode->nlink--;
+        }
+
+        inode->ctime = time(NULL);
+        dirty_inode(target_ino, ctx);
+
+        // delete inode if necessary
+        if (inode->nlink == 0) 
+        {
+            if (_truncate(target_ino, 0, ctx) < 0) 
+            {
+                return -EIO;
+            }
+
+            free_inode(target_ino, ctx);
+        }
+
+        return 0;
+    }
+
+    return -ENOENT;
 }
 
 
