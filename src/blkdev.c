@@ -48,6 +48,8 @@ static int blkdev_size(struct blkdev * dev)
     {
         return BLKDEV_E_UNAVAIL;
     }
+
+    return im->size;
 }
 
 /**

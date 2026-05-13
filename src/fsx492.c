@@ -326,15 +326,32 @@ static inline size_t _free_last_blks(
     uint32_t blks[], size_t len, size_t n, struct context * ctx)
 {
     assert(blks);
+    assert(ctx);
+    
     size_t nfreed = 0;
-    for (size_t i = 0; nfreed < n && i < len; i++) {
+
+    for (size_t i = 0; nfreed < n && i < len; i++) 
+    {
         size_t idx = (len - 1) - i;
-        if (validate_block(blks[idx], ctx) == 0) {
+
+        if (blks[idx] == 0) 
+        {
+            continue;
+        }
+
+        if (blks[idx] < ctx->data_base) 
+        {
+            continue;
+        }
+
+        if (validate_block(blks[idx], ctx) == 0) 
+        {
             free_blk(blks[idx], ctx);
             blks[idx] = 0;
             nfreed++;
         }
     }
+
     return nfreed;
 }
 
@@ -787,11 +804,14 @@ static int _truncate(uint32_t ino, off_t len, struct context * ctx)
     size_t first_freed = (len / FSX492_BLKSZ) + !!(len % FSX492_BLKSZ);
 
     // calculate how many blocks to free
-    size_t nfree = inode->blocks - first_freed;
-    if (nfree < 0) {
-        // desired length is longer than current length
+    if (first_freed >= inode->blocks) 
+    {
+        inode->size = len;
+        dirty_inode(inode->ino, ctx);
         return 0;
     }
+
+    size_t nfree = inode->blocks - first_freed;
 
     size_t freed = 0;
 
@@ -809,7 +829,7 @@ static int _truncate(uint32_t ino, off_t len, struct context * ctx)
 
     if (nfree && inode->blocks > 0) {
         size_t nfreed = _free_last_direct_blks(inode, nfree, ctx);
-        freed += nfree;
+        freed += nfreed;
         nfree -= nfreed;
     }
 
@@ -1387,8 +1407,9 @@ int fsx492_mknod(const char * path, mode_t mode, dev_t dev)
     inode->nlink = 0;
     inode->blocks = 0;
     inode->ctime = inode->mtime = inode->atime = time(NULL);
-    for (int i = 0; i < FSX492_N_DIRECT; i++) {
-        inode->direct_blks[0] = 0;
+    for (int i = 0; i < FSX492_N_DIRECT; i++) 
+    {
+        inode->direct_blks[i] = 0;
     }
     inode->indir1_blks = 0;
     inode->indir2_blks = 0;
@@ -1452,6 +1473,15 @@ int fsx492_open(const char * path, struct fuse_file_info * fi)
     if (validate_inode(ino, ctx) < 0) return -ENOENT;
     
     if (S_ISDIR(ctx->inodes[ino].mode)) return -EISDIR;
+
+    if ((fi->flags & O_TRUNC) && (fi->flags & (O_WRONLY | O_RDWR))) {
+        ret = _truncate(ino, 0, ctx);
+        if (ret < 0) return ret;
+
+        ctx->inodes[ino].mtime = time(NULL);
+        ctx->inodes[ino].ctime = ctx->inodes[ino].mtime;
+        dirty_inode(ino, ctx);
+    }
     
     struct fh * fh = malloc(sizeof(struct fh));
     if (!fh) return -ENOSPC;
@@ -1624,6 +1654,9 @@ int fsx492_read(const char * path, char * buf, size_t size,
         }
     }
 
+    inode->atime = time(NULL);
+    dirty_inode(ino, ctx);
+
     return (int)(size - to_read);
 }
 
@@ -1674,6 +1707,9 @@ int fsx492_write(const char * path, const char * buf, size_t size,
     struct fsx492_inode * inode = &ctx->inodes[ino];
     
     if (S_ISDIR(inode->mode)) return -EISDIR;
+    if (((struct fh *)fi->fh)->flags & O_APPEND) {
+        offset = inode->size;
+    }
     
     off_t end_offset = offset + size;
     size_t required_blocks = (end_offset + FSX492_BLKSZ - 1) / FSX492_BLKSZ;
@@ -1789,6 +1825,7 @@ int fsx492_write(const char * path, const char * buf, size_t size,
         inode->size = end_offset;
     }
     inode->mtime = time(NULL);
+    inode->ctime = inode->mtime;
     dirty_inode(ino, ctx);
     
     return size;
@@ -1901,7 +1938,7 @@ int fsx492_mkdir(const char * path, mode_t mode)
     inode->uid = getuid();
     inode->gid = getgid();
     inode->size = 0;
-    inode->nlink = 2;
+    inode->nlink = 1;
     inode->blocks = 0;
     inode->ctime = inode->mtime = inode->atime = time(NULL);
     for (int i = 0; i < FSX492_N_DIRECT; i++) {
@@ -2064,7 +2101,13 @@ int fsx492_readdir(const char * path, void * buf, fuse_fill_dir_t filler,
     for (int i = 0; i < FSX492_N_DIRECT; i++) {
 
         // load the direct block of entries
-        if (read_blks(dir_inode->direct_blks[i], 1, (void *)entries) < 0) {
+        if (dir_inode->direct_blks[i] == 0) 
+        {
+            continue;
+        }
+
+        if (read_blks(dir_inode->direct_blks[i], 1, (void *)entries) < 0) 
+        {
             return -EIO;
         }
 
@@ -2137,29 +2180,40 @@ int fsx492_link(const char * oldpath, const char * newpath)
     assert(newpath);
 
     struct context * ctx = (struct context *)fuse_get_context()->private_data;
-    
+
     int ret = 0;
-    uint32_t old_ino = 0, parent_ino = 0;
-    
+    uint32_t old_ino = 0;
+    uint32_t new_ino = 0;
+    uint32_t parent_ino = 0;
+
     ret = lookup_path(oldpath, &old_ino, NULL);
     if (ret < 0) return ret;
     
-    if (ctx->inodes[old_ino].nlink >= LINK_MAX) {
+    if (ctx->inodes[old_ino].nlink >= UINT32_MAX) {
         return -EMLINK;
     }
-    
-    uint32_t target_ino = 0;
-    ret = lookup_path(newpath, &target_ino, &parent_ino);
+
+    ret = lookup_path(newpath, &new_ino, &parent_ino);
+
     if (ret == 0) {
         return -EEXIST;
     }
-    if (ret != -ENOENT || !target_ino) {
+
+    if (ret != -ENOENT) {
         return ret;
     }
-    
-    assert(parent_ino);
-    
-    return _link(basename(newpath), old_ino, parent_ino, ctx);
+
+    if (!new_ino || !parent_ino) {
+        return -ENOENT;
+    }
+
+    ret = _link(basename(newpath), old_ino, parent_ino, ctx);
+    if (ret < 0) {
+        return ret;
+    }
+
+    writeback_metadata(ctx);
+    return 0;
 }
 
 
@@ -2297,7 +2351,7 @@ int fsx492_truncate(const char * path, off_t len, struct fuse_file_info *fi)
         return -EISDIR;
     }
 
-    return _truncate(ino, 0, ctx);
+    return _truncate(ino, len, ctx);
 }
 
 
@@ -2405,6 +2459,7 @@ int fsx492_chmod(const char * path, mode_t mode, struct fuse_file_info * fi)
     
     mode_t old_mode = ctx->inodes[ino].mode;
     ctx->inodes[ino].mode = (old_mode & S_IFMT) | (mode & ~S_IFMT);
+    ctx->inodes[ino].ctime = time(NULL);
     dirty_inode(ino, ctx);
     
     return 0;
@@ -2459,6 +2514,7 @@ int fsx492_utimens(
     ctx->inodes[ino].atime = (tv[0].tv_nsec == UTIME_NOW) ? now : tv[0].tv_sec;
     ctx->inodes[ino].mtime = (tv[1].tv_nsec == UTIME_NOW) ? now : tv[1].tv_sec;
 
+    dirty_inode(ino, ctx);
     return 0;
 }
 

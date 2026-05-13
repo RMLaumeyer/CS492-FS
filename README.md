@@ -1,9 +1,9 @@
 # FSX492
 
 Group Members
-- member1 (rlaumeye)
-- member2 (llazzari)
-- member3 (jmcderm2)
+- Robert Laumeyer (rlaumeye)
+- Louis Lazzarini (llazzari)
+- James McDermott (jmcderm2)
 
 Additional features implemented:
 
@@ -17,10 +17,10 @@ Additional features implemented:
 These functions simulate disk operations.
 They are critical for anything to work correctly.
 
-- [ ] `blkdev_read`
-- [ ] `blkdev_write`
-- [ ] `blkdev_flush`
-- [ ] `blkdev_close`
+- [x] `blkdev_read`
+- [x] `blkdev_write`
+- [x] `blkdev_flush`
+- [x] `blkdev_close`
 
 ## `fsx492.c`
 
@@ -28,10 +28,10 @@ They are critical for anything to work correctly.
 
 These are important helper functions.
 
-- [ ] `search_block` (optional if not needed)
-- [ ] `find_entry`
-- [ ] `_link`
-- [ ] `_unlink`
+- [x] `search_block` (optional if not needed)
+- [x] `find_entry`
+- [x] `_link`
+- [x] `_unlink`
 
 ### FUSE Callbacks
 
@@ -40,16 +40,16 @@ These are the FUSE callbacks that need to be implemented.
 
 They are listed in suggested order of implementation.
 
-- [ ] `fsx492_getattr` (high priority)
-- [ ] `fsx492_opendir` (high priority)
-- [ ] `fsx492_releasedir` (high priority)
-- [ ] `fsx492_mkdir`
-- [ ] `fsx492_rmdir`
-- [ ] `fsx492_open`
-- [ ] `fsx492_release`
-- [ ] `fsx492_write` (difficult)
-- [ ] `fsx492_link`
-- [ ] `fsx492_chmod`
+- [x] `fsx492_getattr` (high priority)
+- [x] `fsx492_opendir` (high priority)
+- [x] `fsx492_releasedir` (high priority)
+- [x] `fsx492_mkdir`
+- [x] `fsx492_rmdir`
+- [x] `fsx492_open`
+- [x] `fsx492_release`
+- [x] `fsx492_write` (difficult)
+- [x] `fsx492_link`
+- [x] `fsx492_chmod`
 
 For additional features:
 (Note that these functions do not exist in the template, you must add them.)
@@ -66,13 +66,13 @@ See the `test.py` file for examples of how these can be written.
 
 You should create tests for at least the following conditions:
 
-- [ ] adding and removing files from subdirectories
-- [ ] adding and removing more than a block's worth of directories (at once)
-- [ ] overwriting a file (see `open` behavior)
-- [ ] opening a file in "append" mode (see `open` behavior)
-- [ ] counting hard links
-- [ ] update access/modification time
-- [ ] changing permissions
+- [x] adding and removing files from subdirectories
+- [x] adding and removing more than a block's worth of directories (at once)
+- [x] overwriting a file (see `open` behavior)
+- [x] opening a file in "append" mode (see `open` behavior)
+- [x] counting hard links
+- [x] update access/modification time
+- [x] changing permissions
 
 If you implement permissions checking:
 
