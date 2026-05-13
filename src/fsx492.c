@@ -1293,13 +1293,19 @@ int fsx492_getattr(
     assert(path);
     struct context * ctx = (struct context *)fuse_get_context()->private_data;
 
-    // TODO:
+    uint32_t ino = 0;
+    int ret = 0;
 
-    // lookup inode (or skip lookup if handle already open in fi)
+    if (fi && fi->fh) {
+        ino = ((struct fh *)fi->fh)->ino;
+    } else {
+        if ((ret = lookup_path(path, &ino, NULL)) < 0) {
+            return ret;
+        }
+    }
 
-    // copy stat info to statbuf
-
-    return -ENOSYS;
+    copy_stat(&ctx->inodes[ino], statbuf);
+    return 0;
 }
 
 
@@ -1439,17 +1445,25 @@ int fsx492_open(const char * path, struct fuse_file_info * fi)
     assert(fi);
     struct context * ctx = (struct context *)fuse_get_context()->private_data;
 
-    // TODO:
-
-    // lookup path and validate inode
-
-    // (option: perform permissions checking)
-
-    // create the file handle
-
-    // store file handle in fi->fh
-
-    return -ENOSYS;
+    uint32_t ino = 0;
+    int ret = lookup_path(path, &ino, NULL);
+    if (ret < 0) return ret;
+    
+    if (validate_inode(ino, ctx) < 0) return -ENOENT;
+    
+    if (S_ISDIR(ctx->inodes[ino].mode)) return -EISDIR;
+    
+    struct fh * fh = malloc(sizeof(struct fh));
+    if (!fh) return -ENOSPC;
+    
+    fh->ino = ino;
+    fh->flags = fi->flags;
+    fi->fh = (uint64_t)fh;
+    
+    ctx->inodes[ino].atime = time(NULL);
+    dirty_inode(ino, ctx);
+    
+    return 0;
 }
 
 
@@ -1654,20 +1668,130 @@ int fsx492_write(const char * path, const char * buf, size_t size,
 
     struct context * ctx = (struct context *)fuse_get_context()->private_data;
     
-    // TODO:
-
-    // validate file handle
-
-    // write to direct blocks if needed (allocate space as needed)
-
-    // write to indir1 blocks if needed (allocate space as needed)
-
-    // write to indir2 blocks if needed (allocate space as needed)
-
-    // update inode and mark dirty
-
-
-    return -ENOSYS;
+    uint32_t ino = ((struct fh *)fi->fh)->ino;
+    if (validate_inode(ino, ctx) < 0) return -EBADF;
+    
+    struct fsx492_inode * inode = &ctx->inodes[ino];
+    
+    if (S_ISDIR(inode->mode)) return -EISDIR;
+    
+    off_t end_offset = offset + size;
+    size_t required_blocks = (end_offset + FSX492_BLKSZ - 1) / FSX492_BLKSZ;
+    
+    while (inode->blocks < required_blocks) {
+        uint32_t blkno;
+        if (alloc_blk(&blkno, ctx) < 0) {
+            return -ENOSPC;
+        }
+        
+        if (inode->blocks < FSX492_N_DIRECT) {
+            inode->direct_blks[inode->blocks] = blkno;
+        }
+        else if (inode->blocks < FSX492_N_DIRECT + FSX492_PTRS_PER_BLK) {
+            if (inode->indir1_blks == 0) {
+                if (alloc_blk(&inode->indir1_blks, ctx) < 0) {
+                    free_blk(blkno, ctx);
+                    return -ENOSPC;
+                }
+                uint32_t zero[FSX492_PTRS_PER_BLK] = {0};
+                write_blks(inode->indir1_blks, 1, zero);
+            }
+            
+            uint32_t indir[FSX492_PTRS_PER_BLK];
+            read_blks(inode->indir1_blks, 1, indir);
+            indir[inode->blocks - FSX492_N_DIRECT] = blkno;
+            write_blks(inode->indir1_blks, 1, indir);
+        }
+        else {
+            if (inode->indir2_blks == 0) {
+                if (alloc_blk(&inode->indir2_blks, ctx) < 0) {
+                    free_blk(blkno, ctx);
+                    return -ENOSPC;
+                }
+                uint32_t zero[FSX492_PTRS_PER_BLK] = {0};
+                write_blks(inode->indir2_blks, 1, zero);
+            }
+            
+            uint32_t indir2[FSX492_PTRS_PER_BLK];
+            read_blks(inode->indir2_blks, 1, indir2);
+            
+            size_t idx = inode->blocks - FSX492_N_DIRECT - FSX492_PTRS_PER_BLK;
+            size_t i = idx / FSX492_PTRS_PER_BLK;
+            size_t j = idx % FSX492_PTRS_PER_BLK;
+            
+            if (indir2[i] == 0) {
+                if (alloc_blk(&indir2[i], ctx) < 0) {
+                    free_blk(blkno, ctx);
+                    return -ENOSPC;
+                }
+                uint32_t zero[FSX492_PTRS_PER_BLK] = {0};
+                write_blks(indir2[i], 1, zero);
+                write_blks(inode->indir2_blks, 1, indir2);
+            }
+            
+            uint32_t indir1[FSX492_PTRS_PER_BLK];
+            read_blks(indir2[i], 1, indir1);
+            indir1[j] = blkno;
+            write_blks(indir2[i], 1, indir1);
+        }
+        
+        inode->blocks++;
+        dirty_inode(ino, ctx);
+    }
+    
+    char tmpbuf[FSX492_BLKSZ];
+    size_t to_write = size;
+    off_t curr_offset = offset;
+    const char * write_ptr = buf;
+    
+    while (to_write > 0) {
+        size_t blk_idx = curr_offset / FSX492_BLKSZ;
+        size_t blk_offset = curr_offset % FSX492_BLKSZ;
+        size_t blk_write = (to_write > FSX492_BLKSZ - blk_offset) ? 
+            FSX492_BLKSZ - blk_offset : to_write;
+        
+        uint32_t blkno = 0;
+        
+        if (blk_idx < FSX492_N_DIRECT) {
+            blkno = inode->direct_blks[blk_idx];
+        } else if (blk_idx < FSX492_N_DIRECT + FSX492_PTRS_PER_BLK) {
+            uint32_t indir[FSX492_PTRS_PER_BLK];
+            read_blks(inode->indir1_blks, 1, indir);
+            blkno = indir[blk_idx - FSX492_N_DIRECT];
+        } else {
+            uint32_t indir2[FSX492_PTRS_PER_BLK];
+            read_blks(inode->indir2_blks, 1, indir2);
+            size_t idx = blk_idx - FSX492_N_DIRECT - FSX492_PTRS_PER_BLK;
+            size_t i = idx / FSX492_PTRS_PER_BLK;
+            size_t j = idx % FSX492_PTRS_PER_BLK;
+            
+            uint32_t indir1[FSX492_PTRS_PER_BLK];
+            read_blks(indir2[i], 1, indir1);
+            blkno = indir1[j];
+        }
+        
+        if (read_blks(blkno, 1, tmpbuf) < 0) {
+            return -EIO;
+        }
+        
+        memcpy(tmpbuf + blk_offset, write_ptr, blk_write);
+        
+        if (write_blks(blkno, 1, tmpbuf) < 0) {
+            return -EIO;
+        }
+        
+        to_write -= blk_write;
+        curr_offset += blk_write;
+        write_ptr += blk_write;
+    }
+    
+    if (end_offset > inode->size) {
+        inode->size = end_offset;
+    }
+    inode->mtime = time(NULL);
+    dirty_inode(ino, ctx);
+    
+    return size;
 }
 
 
@@ -1704,13 +1828,15 @@ int fsx492_release(const char * path, struct fuse_file_info * fi)
     fprintf(stdout, "fsx492_release: %s\n", path);
     assert(path);
 
-    // TODO:
-
-    // release resources from opened file (e.g. file handle)
-
-    // write back metadata
-
-    return -ENOSYS;
+    if (fi && fi->fh) {
+        free((struct fh *)fi->fh);
+        fi->fh = 0;
+    }
+    
+    struct context * ctx = (struct context *)fuse_get_context()->private_data;
+    writeback_metadata(ctx);
+    
+    return 0;
 }
 
 
@@ -1744,21 +1870,90 @@ int fsx492_mkdir(const char * path, mode_t mode)
     fprintf(stdout, "fsx492_mkdir: %s\n", path);
     struct context * ctx = (struct context *)fuse_get_context()->private_data;
 
-    // TODO:
-
-    // lookup parent directory path (see docs for `lookup_path`)
-
-    // create a new directory inode
-
-    // allocate space for directory entries
-
-    // add `.` and `..` subdirectories
-
-    // link new directory to parent directory
-
-    // mark dirty inodes for writeback
-
-    return -ENOSYS;
+    int ret = 0;
+    uint32_t target_ino = 0, parent_ino = 0;
+    
+    switch (ret = lookup_path(path, &target_ino, &parent_ino)) {
+    case 0:
+        return -EEXIST;
+    case -EIO:
+    case -ENOTDIR:
+    case -EINVAL:
+        return ret;
+    case -ENOENT:
+        if (!target_ino) return ret;
+        break;
+    default:
+        assert(0);
+    }
+    
+    assert(parent_ino);
+    
+    uint32_t ino = 0;
+    if ((ret = alloc_inode(&ino, ctx)) < 0) {
+        fprintf(stderr, "fsx492_mkdir: failed to allocate inode\n");
+        return ret;
+    }
+    
+    struct fsx492_inode * inode = &ctx->inodes[ino];
+    inode->ino = ino;
+    inode->mode = mode | S_IFDIR;
+    inode->uid = getuid();
+    inode->gid = getgid();
+    inode->size = 0;
+    inode->nlink = 2;
+    inode->blocks = 0;
+    inode->ctime = inode->mtime = inode->atime = time(NULL);
+    for (int i = 0; i < FSX492_N_DIRECT; i++) {
+        inode->direct_blks[i] = 0;
+    }
+    inode->indir1_blks = 0;
+    inode->indir2_blks = 0;
+    
+    uint32_t blkno = 0;
+    if ((ret = alloc_blk(&blkno, ctx)) < 0) {
+        free_inode(ino, ctx);
+        return ret;
+    }
+    inode->direct_blks[0] = blkno;
+    inode->blocks = 1;
+    
+    struct fsx492_dirent entries[FSX492_DIRENTRIES_PER_BLK];
+    memset(entries, 0, sizeof(entries));
+    
+    entries[0].valid = 1;
+    entries[0].ino = ino;
+    strcpy(entries[0].name, ".");
+    
+    entries[1].valid = 1;
+    entries[1].ino = parent_ino;
+    strcpy(entries[1].name, "..");
+    
+    inode->size = 2 * sizeof(struct fsx492_dirent);
+    
+    if (write_blks(blkno, 1, (void *)entries) < 0) {
+        free_blk(blkno, ctx);
+        free_inode(ino, ctx);
+        return -EIO;
+    }
+    
+    dirty_inode(ino, ctx);
+    
+    struct fsx492_inode * parent = &ctx->inodes[parent_ino];
+    parent->nlink++;
+    dirty_inode(parent_ino, ctx);
+    
+    if ((ret = _link(basename(path), ino, parent_ino, ctx)) < 0) {
+        _unlink(".", ino, ctx);
+        _unlink("..", ino, ctx);
+        free_blk(blkno, ctx);
+        free_inode(ino, ctx);
+        parent->nlink--;
+        dirty_inode(parent_ino, ctx);
+        return ret;
+    }
+    
+    return 0;
 }
 
 
@@ -1781,17 +1976,22 @@ int fsx492_opendir(const char * path, struct fuse_file_info * fi)
     assert(fi);
     struct context * ctx = (struct context *)fuse_get_context()->private_data;
     
-    // TODO:
-
-    // look up the directory inode
-
-    // create a new file handle
-
-    // (optional) perform permissions checking
-
-    // update fi with file handle
-
-    return -ENOSYS;
+    uint32_t ino = 0;
+    int ret = lookup_path(path, &ino, NULL);
+    if (ret < 0) return ret;
+    
+    if (validate_inode(ino, ctx) < 0) return -ENOENT;
+    
+    if (!S_ISDIR(ctx->inodes[ino].mode)) return -ENOTDIR;
+    
+    struct fh * fh = malloc(sizeof(struct fh));
+    if (!fh) return -ENOSPC;
+    
+    fh->ino = ino;
+    fh->flags = fi->flags;
+    fi->fh = (uint64_t)fh;
+    
+    return 0;
 }
 
 
@@ -1905,13 +2105,15 @@ int fsx492_releasedir(const char * path, struct fuse_file_info * fi)
     fprintf(stdout, "fsx492_releasedir: %s\n", path);
     assert(fi);
     
-    // TODO:
-
-    // free allocated resources (file handle)
-
-    // write back dirty metadata
-
-    return -ENOSYS;
+    if (fi && fi->fh) {
+        free((struct fh *)fi->fh);
+        fi->fh = 0;
+    }
+    
+    struct context * ctx = (struct context *)fuse_get_context()->private_data;
+    writeback_metadata(ctx);
+    
+    return 0;
 }
 
 
@@ -1934,11 +2136,30 @@ int fsx492_link(const char * oldpath, const char * newpath)
     assert(oldpath);
     assert(newpath);
 
-    // lookup paths
-
-    // link old inode to new directory inode
-
-    return -ENOSYS;
+    struct context * ctx = (struct context *)fuse_get_context()->private_data;
+    
+    int ret = 0;
+    uint32_t old_ino = 0, parent_ino = 0;
+    
+    ret = lookup_path(oldpath, &old_ino, NULL);
+    if (ret < 0) return ret;
+    
+    if (ctx->inodes[old_ino].nlink >= LINK_MAX) {
+        return -EMLINK;
+    }
+    
+    uint32_t target_ino = 0;
+    ret = lookup_path(newpath, &target_ino, &parent_ino);
+    if (ret == 0) {
+        return -EEXIST;
+    }
+    if (ret != -ENOENT || !target_ino) {
+        return ret;
+    }
+    
+    assert(parent_ino);
+    
+    return _link(basename(newpath), old_ino, parent_ino, ctx);
 }
 
 
@@ -1996,19 +2217,41 @@ int fsx492_rmdir(const char * path)
     fprintf(stdout, "fsx492_rmdir: %s\n", path);
     assert(path);
 
-    // TODO:
-
-    // lookup directory inode
-
-    // confirm inode is directory
-
-    // confirm directory is empty (only `.` and `..` entries)
-
-    // remove `.` and `..` subdirectories
-
-    // unlink directory inode from parent
-
-    return -ENOSYS;
+    int ret = 0;
+    uint32_t ino = 0, parent_ino = 0;
+    struct context * ctx = (struct context *)fuse_get_context()->private_data;
+    
+    ret = lookup_path(path, &ino, &parent_ino);
+    if (ret < 0) return ret;
+    
+    assert(ino);
+    assert(parent_ino);
+    
+    if (!S_ISDIR(ctx->inodes[ino].mode)) return -ENOTDIR;
+    
+    struct fsx492_inode * dir_inode = &ctx->inodes[ino];
+    if (dir_inode->size > 2 * sizeof(struct fsx492_dirent)) {
+        return -ENOTEMPTY;
+    }
+    
+    ret = _unlink(basename(path), parent_ino, ctx);
+    if (ret < 0) return ret;
+    
+    for (int i = 0; i < FSX492_N_DIRECT; i++) {
+        if (dir_inode->direct_blks[i]) {
+            free_blk(dir_inode->direct_blks[i], ctx);
+            dir_inode->direct_blks[i] = 0;
+        }
+    }
+    
+    struct fsx492_inode * parent = &ctx->inodes[parent_ino];
+    parent->nlink--;
+    dirty_inode(parent_ino, ctx);
+    
+    dir_inode->blocks = 0;
+    free_inode(ino, ctx);
+    
+    return 0;
 }
 
 
@@ -2146,13 +2389,25 @@ int fsx492_chmod(const char * path, mode_t mode, struct fuse_file_info * fi)
     fprintf(stdout, "fsx492_chmod: %s\n", path);
     assert(path);
 
-    // TODO:
-
-    // lookup inode
-
-    // update mode bits (directories and regular files only)
-
-    return -ENOSYS;
+    struct context * ctx = (struct context *)fuse_get_context()->private_data;
+    
+    uint32_t ino = 0;
+    int ret = 0;
+    
+    if (fi && fi->fh) {
+        ino = ((struct fh *)fi->fh)->ino;
+    } else {
+        ret = lookup_path(path, &ino, NULL);
+        if (ret < 0) return ret;
+    }
+    
+    if (validate_inode(ino, ctx) < 0) return -ENOENT;
+    
+    mode_t old_mode = ctx->inodes[ino].mode;
+    ctx->inodes[ino].mode = (old_mode & S_IFMT) | (mode & ~S_IFMT);
+    dirty_inode(ino, ctx);
+    
+    return 0;
 }
 
 
