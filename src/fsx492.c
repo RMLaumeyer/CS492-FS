@@ -473,6 +473,7 @@ static inline size_t _free_last_indir2_blks(
         size_t mfreed = _free_last_blks(blks1, FSX492_PTRS_PER_BLK, n, ctx);
 
         nfreed += mfreed;
+        n -= mfreed;
         inode->blocks -= mfreed;
         dirty_inode(inode->ino, ctx);
 
@@ -485,6 +486,10 @@ static inline size_t _free_last_indir2_blks(
             // should be empty and should be freed
             free_blk(blks2[idx], ctx);
             blks2[idx] = 0;
+        }
+
+        if (n == 0) {
+            break;
         }
     }
 
@@ -1190,6 +1195,14 @@ void * fsx492_init(struct fuse_conn_info * conn, struct fuse_config * cfg)
     fprintf(stdout, "fsx492_init\n");
     assert(disk);
     assert(disk->ops);
+
+    if (cfg) {
+        cfg->use_ino = 1;
+        cfg->entry_timeout = 0;
+        cfg->attr_timeout = 0;
+        cfg->negative_timeout = 0;
+    }
+
     struct fsx492_superblk sb;
     int result = 0;
 
@@ -1464,6 +1477,10 @@ int fsx492_open(const char * path, struct fuse_file_info * fi)
 {
     fprintf(stdout, "fsx492_open: %s\n", path);
     assert(fi);
+    
+    fi->direct_io = 1;
+    fi->keep_cache = 0;
+
     struct context * ctx = (struct context *)fuse_get_context()->private_data;
 
     uint32_t ino = 0;
@@ -1481,6 +1498,9 @@ int fsx492_open(const char * path, struct fuse_file_info * fi)
         ctx->inodes[ino].mtime = time(NULL);
         ctx->inodes[ino].ctime = ctx->inodes[ino].mtime;
         dirty_inode(ino, ctx);
+
+        ret = writeback_metadata(ctx);
+        if (ret < 0) return ret;
     }
     
     struct fh * fh = malloc(sizeof(struct fh));
@@ -1707,10 +1727,15 @@ int fsx492_write(const char * path, const char * buf, size_t size,
     struct fsx492_inode * inode = &ctx->inodes[ino];
     
     if (S_ISDIR(inode->mode)) return -EISDIR;
+
     if (((struct fh *)fi->fh)->flags & O_APPEND) {
         offset = inode->size;
     }
-    
+
+    if (offset > inode->size) {
+        return -EINVAL;
+    }
+
     off_t end_offset = offset + size;
     size_t required_blocks = (end_offset + FSX492_BLKSZ - 1) / FSX492_BLKSZ;
     
@@ -1730,13 +1755,25 @@ int fsx492_write(const char * path, const char * buf, size_t size,
                     return -ENOSPC;
                 }
                 uint32_t zero[FSX492_PTRS_PER_BLK] = {0};
-                write_blks(inode->indir1_blks, 1, zero);
+                if (write_blks(inode->indir1_blks, 1, zero) < 0) {
+                    free_blk(blkno, ctx);
+                    return -EIO;
+                }
             }
             
             uint32_t indir[FSX492_PTRS_PER_BLK];
-            read_blks(inode->indir1_blks, 1, indir);
+
+            if (read_blks(inode->indir1_blks, 1, indir) < 0) {
+                free_blk(blkno, ctx);
+                return -EIO;
+            }
+
             indir[inode->blocks - FSX492_N_DIRECT] = blkno;
-            write_blks(inode->indir1_blks, 1, indir);
+
+            if (write_blks(inode->indir1_blks, 1, indir) < 0) {
+                free_blk(blkno, ctx);
+                return -EIO;
+            }
         }
         else {
             if (inode->indir2_blks == 0) {
@@ -1745,11 +1782,18 @@ int fsx492_write(const char * path, const char * buf, size_t size,
                     return -ENOSPC;
                 }
                 uint32_t zero[FSX492_PTRS_PER_BLK] = {0};
-                write_blks(inode->indir2_blks, 1, zero);
+                if (write_blks(inode->indir2_blks, 1, zero) < 0) {
+                    free_blk(blkno, ctx);
+                    return -EIO;
+                }
             }
             
             uint32_t indir2[FSX492_PTRS_PER_BLK];
-            read_blks(inode->indir2_blks, 1, indir2);
+
+            if (read_blks(inode->indir2_blks, 1, indir2) < 0) {
+                free_blk(blkno, ctx);
+                return -EIO;
+            }
             
             size_t idx = inode->blocks - FSX492_N_DIRECT - FSX492_PTRS_PER_BLK;
             size_t i = idx / FSX492_PTRS_PER_BLK;
@@ -1761,14 +1805,31 @@ int fsx492_write(const char * path, const char * buf, size_t size,
                     return -ENOSPC;
                 }
                 uint32_t zero[FSX492_PTRS_PER_BLK] = {0};
-                write_blks(indir2[i], 1, zero);
-                write_blks(inode->indir2_blks, 1, indir2);
+
+                if (write_blks(indir2[i], 1, zero) < 0) {
+                    free_blk(blkno, ctx);
+                    return -EIO;
+                }
+
+                if (write_blks(inode->indir2_blks, 1, indir2) < 0) {
+                    free_blk(blkno, ctx);
+                    return -EIO;
+                }
             }
             
             uint32_t indir1[FSX492_PTRS_PER_BLK];
-            read_blks(indir2[i], 1, indir1);
+
+            if (read_blks(indir2[i], 1, indir1) < 0) {
+                free_blk(blkno, ctx);
+                return -EIO;
+            }
+
             indir1[j] = blkno;
-            write_blks(indir2[i], 1, indir1);
+
+            if (write_blks(indir2[i], 1, indir1) < 0) {
+                free_blk(blkno, ctx);
+                return -EIO;
+            }
         }
         
         inode->blocks++;
@@ -1792,17 +1853,28 @@ int fsx492_write(const char * path, const char * buf, size_t size,
             blkno = inode->direct_blks[blk_idx];
         } else if (blk_idx < FSX492_N_DIRECT + FSX492_PTRS_PER_BLK) {
             uint32_t indir[FSX492_PTRS_PER_BLK];
-            read_blks(inode->indir1_blks, 1, indir);
+
+            if (read_blks(inode->indir1_blks, 1, indir) < 0) {
+                return -EIO;
+            }
+
             blkno = indir[blk_idx - FSX492_N_DIRECT];
         } else {
             uint32_t indir2[FSX492_PTRS_PER_BLK];
-            read_blks(inode->indir2_blks, 1, indir2);
+
+            if (read_blks(inode->indir2_blks, 1, indir2) < 0) {
+                return -EIO;
+            }
             size_t idx = blk_idx - FSX492_N_DIRECT - FSX492_PTRS_PER_BLK;
             size_t i = idx / FSX492_PTRS_PER_BLK;
             size_t j = idx % FSX492_PTRS_PER_BLK;
             
             uint32_t indir1[FSX492_PTRS_PER_BLK];
-            read_blks(indir2[i], 1, indir1);
+
+            if (read_blks(indir2[i], 1, indir1) < 0) {
+                return -EIO;
+            }
+
             blkno = indir1[j];
         }
         
@@ -1827,7 +1899,11 @@ int fsx492_write(const char * path, const char * buf, size_t size,
     inode->mtime = time(NULL);
     inode->ctime = inode->mtime;
     dirty_inode(ino, ctx);
-    
+
+    if (writeback_metadata(ctx) < 0) {
+        return -EIO;
+    }
+
     return size;
 }
 
@@ -1981,12 +2057,12 @@ int fsx492_mkdir(const char * path, mode_t mode)
     dirty_inode(parent_ino, ctx);
     
     if ((ret = _link(basename(path), ino, parent_ino, ctx)) < 0) {
-        _unlink(".", ino, ctx);
-        _unlink("..", ino, ctx);
         free_blk(blkno, ctx);
-        free_inode(ino, ctx);
+        inode->direct_blks[0] = 0;
+        inode->blocks = 0;
         parent->nlink--;
         dirty_inode(parent_ino, ctx);
+        free_inode(ino, ctx);
         return ret;
     }
     
@@ -2188,7 +2264,11 @@ int fsx492_link(const char * oldpath, const char * newpath)
 
     ret = lookup_path(oldpath, &old_ino, NULL);
     if (ret < 0) return ret;
-    
+
+    if (S_ISDIR(ctx->inodes[old_ino].mode)) {
+        return -EPERM;
+    }
+
     if (ctx->inodes[old_ino].nlink >= UINT32_MAX) {
         return -EMLINK;
     }
@@ -2380,32 +2460,43 @@ int fsx492_rename(
     uint32_t old_ino = 0, oldparent_ino = 0;
     uint32_t new_ino = 0, newparent_ino = 0;
 
-    // unlink newpath if it already exists
-    switch (ret = lookup_path(newpath, &new_ino, &newparent_ino)) {
-    case -EIO:          // disk error
-    case -ENOTDIR:      // bad newpath
+    
+    // find oldpath first
+    if ((ret = lookup_path(oldpath, &old_ino, &oldparent_ino)) < 0) 
+    {
         return ret;
+    }
+
+    assert(old_ino);
+    assert(oldparent_ino);
+
+    // then handle newpath
+    switch (ret = lookup_path(newpath, &new_ino, &newparent_ino)) 
+    {
+    case -EIO:
+    case -ENOTDIR:
+    case -EINVAL:
+        return ret;
+
     case -ENOENT:
-        if (!new_ino)   // bad newpath
+        if (!new_ino)
             return ret;
-        else            // no file at newpath
-            break;
-    case 0:             // found entry
-        if ((ret = _unlink(basename(newpath), newparent_ino, ctx)) < 0) {
+        break;
+
+    case 0:
+        if ((ret = _unlink(basename(newpath), newparent_ino, ctx)) < 0) 
+        {
             assert(ret != -ENOENT);
             return ret;
         }
         break;
-    default:            // unreachable
+
+    default:
         assert(0);
     }
 
     assert(newparent_ino);
 
-    // find oldpath
-    if ((ret = lookup_path(oldpath, &old_ino, &oldparent_ino)) < 0) {
-        return ret;
-    }
     assert(old_ino);
     assert(oldparent_ino);
 

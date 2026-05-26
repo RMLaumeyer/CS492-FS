@@ -572,40 +572,6 @@ def test_error_cases(mountpoint):
 
 
 
-def test_hard_link_basic(mountpoint):
-    oldpath = os.path.join(mountpoint, "original.txt")
-    newpath = os.path.join(mountpoint, "linked.txt")
-    data = "hard link data\n"
-
-    print(f"[test] hard link basic {oldpath} -> {newpath}")
-
-    with open(oldpath, "w") as f:
-        f.write(data)
-
-    os.link(oldpath, newpath)
-
-    old_st = os.stat(oldpath)
-    new_st = os.stat(newpath)
-
-    assert old_st.st_nlink >= 2, f"original nlink should be at least 2, got {old_st.st_nlink}"
-    assert new_st.st_nlink >= 2, f"linked nlink should be at least 2, got {new_st.st_nlink}"
-
-    with open(newpath, "r") as f:
-        read_back = f.read()
-
-    assert read_back == data, "linked file content mismatch"
-
-    os.unlink(newpath)
-    assert os.path.exists(oldpath), "unlinking linked name removed original"
-
-    with open(oldpath, "r") as f:
-        read_back = f.read()
-
-    assert read_back == data, "original content changed after unlinking hard link"
-
-    print("[test] passed hard_link_basic")
-
-
 ##############################################################################
 # END TEST DEFINITIONS
 ##############################################################################

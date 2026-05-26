@@ -258,6 +258,14 @@ int blkdev_init(struct blkdev * dev, char * imgpath)
         return BLKDEV_E_BADDEV;
     }
     // todo: should add a check that this is a regular file
+    if (!S_ISREG(sb.st_mode)) 
+    {
+        fprintf(stderr, "image is not a regular file: %s\n", imgpath);
+        close(im->fd);
+        free(im->path);
+        free(im);
+        return BLKDEV_E_BADDEV;
+    }
 
     // check that file is a multiple of block size
     if (sb.st_size % BLKDEV_BLKSZ) {

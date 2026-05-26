@@ -1,9 +1,9 @@
 # FSX492
 
 Group Members
-- Robert Laumeyer (rlaumeye)
-- Louis Lazzarini (llazzari)
-- James McDermott (jmcderm2)
+- Robert Laumeyer (rlaumeye) -> rlaumeye@stevens.edu
+- Louis Lazzarini (llazzari) -> llazzari@stevens.edu
+- James McDermott (jmcderm2) -> jmcderm2@stevens.edu
 
 Additional features implemented:
 
