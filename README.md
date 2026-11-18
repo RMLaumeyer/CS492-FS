@@ -1,145 +1,175 @@
-# FSX492
+# FSX492 — User-Space File System in C
 
-Group Members
-- Robert Laumeyer (rlaumeye) -> rlaumeye@stevens.edu
-- Louis Lazzarini (llazzari) -> llazzari@stevens.edu
-- James McDermott (jmcderm2) -> jmcderm2@stevens.edu
+A custom user-space file system implemented in C using FUSE (Filesystem in Userspace). Built for CS 492 at Stevens Institute of Technology, this project implements core file system functionality over a simulated block device, including file and directory management, inode tracking, permissions, and link handling.
 
-Additional features implemented:
+Rather than relying on an existing file system, FSX492 manages its own on-disk structures and translates standard Linux file operations into reads and writes against a disk image.
 
-- [ ] access control
-- [ ] symlinks
+## Features
 
-# Implemented Functions
+### File System Operations
 
-## `blkdev.c`
+- **File I/O:** Create, open, read, write, truncate, and delete files.
+- **Directories:** Create, remove, list, and navigate directories, including nested directory structures.
+- **Inode Management:** Track file metadata, block references, ownership, timestamps, and hard-link counts.
+- **Block Storage:** Read and write through a simulated block device, with support for files and directories spanning multiple blocks.
+- **Hard Links:** Support multiple directory entries referencing the same inode, with appropriate link-count management.
+- **Permissions:** Support file permission changes and access checks.
+- **Symbolic Links:** Implement symbolic link creation and resolution, including links to files and directories.
 
-These functions simulate disk operations.
-They are critical for anything to work correctly.
+Access control and symbolic links were implemented as additional features beyond the core assignment requirements.
 
-- [x] `blkdev_read`
-- [x] `blkdev_write`
-- [x] `blkdev_flush`
-- [x] `blkdev_close`
+## Architecture
 
-## `fsx492.c`
+The file system is divided into three main components:
 
-### Helpers
+| Component | Description |
+|---|---|
+| `main.c` | Initializes the block device, processes command-line options, and mounts the file system through FUSE. |
+| `src/fsx492.c` | Implements file system operations, inode management, directory handling, and FUSE callbacks. |
+| `src/blkdev.c` | Provides the simulated block device interface for reading, writing, and managing disk blocks. |
 
-These are important helper functions.
+### On-Disk Structure
 
-- [x] `search_block` (optional if not needed)
-- [x] `find_entry`
-- [x] `_link`
-- [x] `_unlink`
+FSX492 uses a disk image with several structures:
 
-### FUSE Callbacks
+- **Superblock:** Stores file system configuration and metadata.
+- **Inode bitmap:** Tracks allocated and available inodes.
+- **Block bitmap:** Tracks allocated and available disk blocks.
+- **Inode table:** Stores file metadata and pointers to data blocks.
+- **Data blocks:** Store file contents and directory entries.
 
-These are the FUSE callbacks that need to be implemented.
-(All FUSE callbacks that currently return `-ENOSYS`)
+Each inode records information such as file size, permissions, ownership, timestamps, link count, and block pointers. The layout includes direct and indirect block references.
 
-They are listed in suggested order of implementation.
+File system operations are handled through FUSE callbacks, allowing standard Linux commands to interact with the custom file system.
 
-- [x] `fsx492_getattr` (high priority)
-- [x] `fsx492_opendir` (high priority)
-- [x] `fsx492_releasedir` (high priority)
-- [x] `fsx492_mkdir`
-- [x] `fsx492_rmdir`
-- [x] `fsx492_open`
-- [x] `fsx492_release`
-- [x] `fsx492_write` (difficult)
-- [x] `fsx492_link`
-- [x] `fsx492_chmod`
+## Building and Running
 
-For additional features:
-(Note that these functions do not exist in the template, you must add them.)
+### Requirements
 
-- [ ] `fsx492_access` (access control)
-- [ ] `fsx492_symlink` (symlinks)
+- Linux environment with FUSE 3 support
+- GCC
+- Make
+- `pkg-config`
+- Python 3 for testing
 
+On Ubuntu or Debian, the build dependencies can be installed with:
 
-
-## `test.py`
-
-You must write tests that exercise all FUSE callbacks.
-See the `test.py` file for examples of how these can be written.
-
-You should create tests for at least the following conditions:
-
-- [x] adding and removing files from subdirectories
-- [x] adding and removing more than a block's worth of directories (at once)
-- [x] overwriting a file (see `open` behavior)
-- [x] opening a file in "append" mode (see `open` behavior)
-- [x] counting hard links
-- [x] update access/modification time
-- [x] changing permissions
-
-If you implement permissions checking:
-
-- [ ] expect error when opening a write-only file for reading
-- [ ] expect error when opening a read-only file for writing
-- [ ] expect error when reading from a file opened as write-only
-- [ ] expect error when writing to a file opened as read-only
-
-If you implement symlinks:
-
-- [ ] resolve symlink to file and directory
-- [ ] read and write to file via symlink
-- [ ] link/unlink directory entries via symlink
-- [ ] resolve symlinks to symlinks
-
-
-# Helpful Links
-
-- [Geoff Kuenning's (Harvey Mudd) FUSE Documentation](https://www.cs.hmc.edu/~geoff/classes/hmc.cs135.201109/homework/fuse/fuse_doc.html)
-- [libfuse source](https://github.com/libfuse/libfuse)
-- [libfuse documentation](https://libfuse.github.io/doxygen/index.html)
-  - [libfuse operations documentation](https://libfuse.github.io/doxygen/structfuse__operations.html)
-- [Open Group Base Specifications Issue 8](https://pubs.opengroup.org/onlinepubs/9799919799/)
-  - [Open Group Base Spec Headers](https://pubs.opengroup.org/onlinepubs/9799919799/idx/head.html)
-- [linux man-pages](https://man7.org/linux/man-pages/)
-  - [select(2)](https://man7.org/linux/man-pages/man2/select.2.html) (for `fd_set`)
-- [C standard reference](https://en.cppreference.com/c)
-
-
-# ImHex Helper Script
-
-If you would like to use [ImHex](https://docs.werwolv.net/imhex), here is a basic script that highlights the superblock, the inodes, and the first block of entries in the root directory.
-
-```imhex
-struct superblock {
-    u32 magic;
-    u32 inode_map_sz;
-    u32 block_map_sz;
-    u32 inode_region_sz;
-    u32 total_blocks;
-    u32 root_inode;
-    char __padding[1024 - 6 * 4];
-};
-
-struct inode {
-    u32 ino;
-    u32 mode;
-    u16 uid;
-    u16 gid;
-    u32 size;
-    u16 nlink;
-    u16 blocks;
-    u32 atime;
-    u32 ctime;
-    u32 mtime;
-    u32 direct[6];
-    u32 indir1;
-    u32 indir2;
-};
-
-struct dirent {
-    u32 inode;
-    char name[28];
-};
-
-superblock sb @ 0x0;
-inode inodes[64] @ 0x800;
-dirent root[32] @ 0x1c00;
+```bash
+sudo apt install build-essential pkg-config libfuse3-dev fuse3 python3
 ```
 
+### Build
+
+Clone the repository and compile the file system:
+
+```bash
+git clone https://github.com/RMLaumeyer/CS492-FS.git
+cd CS492-FS
+make
+```
+
+This builds the `fsx492` executable.
+
+### Mount the File System
+
+Reset the test disk image and prepare the mount directory:
+
+```bash
+make reset
+```
+
+Start the file system:
+
+```bash
+make mount
+```
+
+The file system mounts at `./testfs` using `data/test.img`.
+
+The provided Makefile runs FUSE in single-threaded debug mode. Keep that process running while interacting with the mounted directory from another terminal.
+
+You can then use standard Linux commands:
+
+```bash
+ls testfs
+mkdir testfs/example
+echo "Hello, FUSE!" > testfs/example/hello.txt
+cat testfs/example/hello.txt
+```
+
+Unmount the file system when finished:
+
+```bash
+fusermount -u ./testfs
+```
+
+## Testing
+
+A Python test suite (`test.py`) exercises file system functionality through standard file and directory operations.
+
+Test coverage includes:
+
+- Creating and removing files and directories.
+- Working with nested directories and directories spanning multiple blocks.
+- File reads, writes, overwrites, appends, and truncation.
+- Hard-link creation and link-count tracking.
+- Permission changes and access-related behavior.
+- File metadata and timestamp updates.
+- Error handling for invalid file system operations.
+
+To run an individual test:
+
+```bash
+python3 test.py basic
+```
+
+The test runner restores the disk image from its backup, mounts the file system, executes the selected test, and performs cleanup.
+
+Additional test names can be found in `test.py`.
+
+## Technical Challenges
+
+Several parts of the implementation required careful handling of file system state and POSIX behavior.
+
+**Block and inode management:** File operations must maintain consistency between allocated blocks, inode metadata, and directory entries. Larger files and directories also require handling data beyond a single block.
+
+**Hard links and deletion:** Removing a directory entry does not necessarily mean deleting its underlying file data. Link counts must be maintained so that shared inodes remain valid until their references are removed.
+
+**File I/O behavior:** Writes, appends, overwrites, and truncation must update both file contents and metadata correctly, including operations that cross block boundaries.
+
+**Permissions and symbolic links:** Extending the file system with access control and symbolic links required additional handling of file metadata, path resolution, and error conditions.
+
+## Repository Structure
+
+```text
+CS492-FS/
+├── data/             # Test disk images and sample data
+├── include/          # Header files and data structures
+├── src/
+│   ├── blkdev.c      # Block device implementation
+│   └── fsx492.c      # File system implementation
+├── utils/            # Supporting utilities
+├── main.c            # FUSE entry point
+├── Makefile          # Build and mount commands
+├── test.py           # Python test suite
+├── screenshots.pdf   # Project screenshots
+└── README.md
+```
+
+## Technologies
+
+C, Linux, FUSE 3, GCC, Make, Python, POSIX File System APIs
+
+## Contributors
+
+Developed as a group project for CS 492 at Stevens Institute of Technology.
+
+- Robert Laumeyer
+- Louis Lazzarini
+- James McDermott
+
+## References
+
+- [libfuse documentation](https://libfuse.github.io/doxygen/)
+- [Linux manual pages](https://man7.org/linux/man-pages/)
+- [POSIX specifications](https://pubs.opengroup.org/onlinepubs/9799919799/)
